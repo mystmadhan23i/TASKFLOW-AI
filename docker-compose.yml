@@ -1,48 +1,251 @@
-# TaskFlow — MongoDB + API + web app.   Usage:  cp .env.example .env  (set JWT_SECRET)  &&  docker compose up --build
-services:
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  backend:
-    build: ./backend
-    restart: unless-stopped
-    depends_on:
-      mongo:
-        condition: service_healthy
-    environment:
-      NODE_ENV: production
-      PORT: 5000
-      MONGODB_URI: mongodb+srv://sermadhan2334_db_user:LAs2tDjSApg7uMHj@cluster01.zvgzw4d.mongodb.net/taskflow?retryWrites=true&w=majority
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
-      CORS_ORIGIN: ${APP_PUBLIC_URL:-http://44.212.67.70:8000}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://44.212.67.70:8000}
-      TRUST_PROXY: "1"
-      UPLOAD_DIR: /app/uploads
-      AI_API_URL: ${AI_API_URL:-}
-      AI_API_KEY: ${AI_API_KEY:-}
-      AI_MODEL: ${AI_MODEL:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - uploads:/app/uploads
-
-  frontend:
-    build: ./frontend
-    restart: unless-stopped
-    depends_on:
-      - backend
-    ports:
-      - "8000:80"
-
-volumes:
-  mongo-data:
-  uploads:
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taskflow
+---
+# ---------- Secrets (replace values, or create with kubectl instead) ----------
+# kubectl -n taskflow create secret generic taskflow-secrets \
+#   --from-literal=JWT_SECRET=$(openssl rand -hex 32) \
+#   --from-literal=AI_API_KEY=
+apiVersion: v1
+kind: Secret
+metadata:
+  name: taskflow-secrets
+  namespace: taskflow
+type: Opaque
+stringData:
+  JWT_SECRET: "CHANGE_ME_run_openssl_rand_-hex_32"
+  AI_API_KEY: ""
+---
+# ---------- Config ----------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskflow-config
+  namespace: taskflow
+data:
+  NODE_ENV: "production"
+  PORT: "5000"
+  # In-cluster 3-member replica set (mongo-0/1/2)
+  MONGODB_URI: "mongodb://mongo-0.mongo:27017,mongo-1.mongo:27017,mongo-2.mongo:27017/taskflow?replicaSet=rs0&retryWrites=true&w=majority"
+  CORS_ORIGIN: "http://44.212.67.70:8000"
+  APP_PUBLIC_URL: "http://44.212.67.70:8000"
+  TRUST_PROXY: "1"
+  UPLOAD_DIR: "/app/uploads"
+  AI_API_URL: ""
+  AI_MODEL: ""
+---
+# ====================== MONGO (replica set, 3 members) ======================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+  namespace: taskflow
+spec:
+  clusterIP: None            # headless: gives stable DNS mongo-0.mongo, mongo-1.mongo, ...
+  selector:
+    app: mongo
+  ports:
+    - port: 27017
+      name: mongo
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: taskflow
+spec:
+  serviceName: mongo
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:7
+          args: ["--replSet", "rs0", "--bind_ip_all"]
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: mongo-data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+---
+# One-time job that initialises the replica set
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-rs-init
+  namespace: taskflow
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: mongo:7
+          command:
+            - bash
+            - -c
+            - |
+              until mongosh --host mongo-0.mongo --quiet --eval "db.adminCommand('ping').ok" \
+                && mongosh --host mongo-1.mongo --quiet --eval "db.adminCommand('ping').ok" \
+                && mongosh --host mongo-2.mongo --quiet --eval "db.adminCommand('ping').ok"; do
+                echo "waiting for mongo pods..."; sleep 3
+              done
+              mongosh --host mongo-0.mongo --quiet --eval '
+                try { rs.status() } catch (e) {
+                  rs.initiate({
+                    _id: "rs0",
+                    members: [
+                      { _id: 0, host: "mongo-0.mongo:27017" },
+                      { _id: 1, host: "mongo-1.mongo:27017" },
+                      { _id: 2, host: "mongo-2.mongo:27017" }
+                    ]
+                  })
+                }'
+---
+# ====================== BACKEND (3 replicas) ======================
+# Uploads are shared by 3 pods, so this PVC needs ReadWriteMany
+# (NFS / EFS / CephFS / Azure Files). Set storageClassName accordingly.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uploads
+  namespace: taskflow
+spec:
+  accessModes: ["ReadWriteMany"]
+  # storageClassName: efs-sc
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: taskflow
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      # Wait for the mongo replica set before starting (replaces depends_on)
+      initContainers:
+        - name: wait-for-mongo
+          image: mongo:7
+          command:
+            - bash
+            - -c
+            - until mongosh "$MONGODB_URI" --quiet --eval "db.adminCommand('ping').ok"; do echo waiting; sleep 3; done
+          envFrom:
+            - configMapRef:
+                name: taskflow-config
+      containers:
+        - name: backend
+          image: taskflow-backend:latest   # build ./backend and push here
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: taskflow-config
+            - secretRef:
+                name: taskflow-secrets
+          volumeMounts:
+            - name: uploads
+              mountPath: /app/uploads
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: uploads
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: taskflow
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 5000
+      targetPort: 5000
+---
+# ====================== FRONTEND (3 replicas) ======================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: taskflow
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: taskflow-frontend:latest  # build ./frontend and push here
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 250m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: taskflow
+spec:
+  type: LoadBalancer        # use NodePort on a bare VM cluster, or put an Ingress in front
+  selector:
+    app: frontend
+  ports:
+    - port: 8000            # same public port as your compose file
+      targetPort: 80
+ 
