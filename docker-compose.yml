@@ -24,7 +24,7 @@ services:
       MONGODB_URI: mongodb://mongo:27017/taskflow
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
       CORS_ORIGIN: ${APP_PUBLIC_URL:-http://44.212.67.70:8080}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8080}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://44.212.67.70:8080}
       TRUST_PROXY: "1"
       UPLOAD_DIR: /app/uploads
       AI_API_URL: ${AI_API_URL:-}
