@@ -21,10 +21,10 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5000
-      MONGODB_URI: mongodb://mongo:27017/taskflow
+      MONGODB_URI: mongodb+srv://sermadhan2334_db_user:LAs2tDjSApg7uMHj@cluster01.zvgzw4d.mongodb.net/taskflow?retryWrites=true&w=majority
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -hex 32)}
-      CORS_ORIGIN: ${APP_PUBLIC_URL:-http://44.212.67.70:8080}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://44.212.67.70:8080}
+      CORS_ORIGIN: ${APP_PUBLIC_URL:-http://44.212.67.70:8000}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://44.212.67.70:8000}
       TRUST_PROXY: "1"
       UPLOAD_DIR: /app/uploads
       AI_API_URL: ${AI_API_URL:-}
@@ -41,7 +41,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "8000:80"
 
 volumes:
   mongo-data:
